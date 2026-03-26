@@ -16,6 +16,10 @@ class PiperMotorsBus:
         self.safe_disable_position = [0.0, 0.0, 0.0, 0.0, 0.52, 0.0, 0.0]
         self.pose_factor = 1000 # 单位 0.001mm
         self.joint_factor = 57324.840764 # 1000*180/3.14， rad -> 度（单位0.001度）
+        self.joint_command_deadband = 120
+        self.gripper_command_deadband = 2000
+        self._last_joint_command = None
+        self._last_gripper_command = None
 
     @property
     def motor_names(self) -> list[str]:
@@ -113,9 +117,26 @@ class PiperMotorsBus:
         joint_5 = round(target_joint[5]*self.joint_factor)
         gripper_range = round(target_joint[6]*1000*1000)
 
+        joint_commands = [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5]
+        joints_changed = self._last_joint_command is None or any(
+            abs(curr - prev) >= self.joint_command_deadband
+            for curr, prev in zip(joint_commands, self._last_joint_command)
+        )
+        gripper_changed = (
+            self._last_gripper_command is None
+            or abs(gripper_range - self._last_gripper_command) >= self.gripper_command_deadband
+        )
+
+        if not joints_changed and not gripper_changed:
+            return
+
         self.piper.MotionCtrl_2(0x01, 0x01, 100, 0x00) # joint control
-        self.piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
-        self.piper.GripperCtrl(abs(gripper_range), 1000, 0x01, 0) # 单位 0.001°
+        if joints_changed:
+            self.piper.JointCtrl(*joint_commands)
+            self._last_joint_command = joint_commands
+        if gripper_changed:
+            self.piper.GripperCtrl(gripper_range, 1000, 0x01, 0) # 单位 0.001°
+            self._last_gripper_command = gripper_range
     
 
     def read(self) -> Dict:

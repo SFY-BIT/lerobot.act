@@ -269,6 +269,12 @@ def control_loop(
         dt_s = time.perf_counter() - start_loop_t
         log_control_info(robot, dt_s, fps=fps)
 
+        if has_method(robot, "consume_control_events"):
+            robot_events = robot.consume_control_events()
+            for key, value in robot_events.items():
+                if value:
+                    events[key] = True
+
         timestamp = time.perf_counter() - start_episode_t
         if events["exit_early"]:
             events["exit_early"] = False

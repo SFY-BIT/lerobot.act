@@ -424,12 +424,18 @@ class OpenCVCamera:
 
         if self.thread is not None:
             self.stop_event.set()
-            self.thread.join()  # wait for the thread to finish
+            # Release the camera first to unblock a pending cv2 read in the worker thread.
+            if self.camera is not None:
+                self.camera.release()
+            self.thread.join(timeout=1.0)
+            if self.thread.is_alive():
+                print(f"Warning: camera reader thread for OpenCVCamera({self.camera_index}) did not stop cleanly.")
             self.thread = None
             self.stop_event = None
 
-        self.camera.release()
-        self.camera = None
+        if self.camera is not None:
+            self.camera.release()
+            self.camera = None
         self.is_connected = False
 
     def __del__(self):

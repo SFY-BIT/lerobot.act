@@ -223,6 +223,11 @@ class PiperRobot:
             obs_dict[f"observation.images.{name}"] = images[name]
         return obs_dict
     
+    def consume_control_events(self) -> dict[str, bool]:
+        if self.teleop is None:
+            return {"exit_early": False, "rerecord_episode": False}
+        return self.teleop.consume_control_events()
+
     def teleop_safety_stop(self):
         """ move to home position after record one episode """
         self.run_calibration()
