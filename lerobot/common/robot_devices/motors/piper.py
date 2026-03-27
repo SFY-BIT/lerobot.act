@@ -20,6 +20,7 @@ class PiperMotorsBus:
         self.gripper_command_deadband = 2000
         self._last_joint_command = None
         self._last_gripper_command = None
+        self._last_move_mode = None
 
     @property
     def motor_names(self) -> list[str]:
@@ -131,11 +132,41 @@ class PiperMotorsBus:
             return
 
         self.piper.MotionCtrl_2(0x01, 0x01, 100, 0x00) # joint control
+        self._last_move_mode = "joint"
         if joints_changed:
             self.piper.JointCtrl(*joint_commands)
             self._last_joint_command = joint_commands
         if gripper_changed:
             self.piper.GripperCtrl(gripper_range, 1000, 0x01, 0) # 单位 0.001°
+            self._last_gripper_command = gripper_range
+
+    def write_pose(self, target_pose: list | tuple, gripper: float):
+        """
+            End-effector pose control
+            - target_pose: [x, y, z, rx, ry, rz]
+              x/y/z in meters, rx/ry/rz in degrees
+            - gripper: opening in meters
+        """
+        if len(target_pose) != 6:
+            raise ValueError(f"Expected 6D end-effector pose, got {len(target_pose)} values.")
+
+        xyz_cmd = [round(axis * 1_000_000) for axis in target_pose[:3]]
+        rpy_cmd = [round(axis * 1000) for axis in target_pose[3:]]
+        gripper_range = round(gripper * 1000 * 1000)
+
+        if self._last_move_mode != "pose":
+            # SDK requires switching to end-pose control mode before EndPoseCtrl.
+            self.piper.ModeCtrl(0x01, 0x00, 100, 0x00)
+            self._last_move_mode = "pose"
+
+        self.piper.EndPoseCtrl(*(xyz_cmd + rpy_cmd))
+
+        gripper_changed = (
+            self._last_gripper_command is None
+            or abs(gripper_range - self._last_gripper_command) >= self.gripper_command_deadband
+        )
+        if gripper_changed:
+            self.piper.GripperCtrl(gripper_range, 1000, 0x01, 0)
             self._last_gripper_command = gripper_range
     
 

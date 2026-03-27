@@ -31,6 +31,12 @@ from lerobot.common.utils.utils import capture_timestamp_utc
 MAX_OPENCV_INDEX = 60
 
 
+def _decode_fourcc(value: float) -> str:
+    code = int(value)
+    chars = [chr((code >> (8 * i)) & 0xFF) for i in range(4)]
+    return "".join(chars)
+
+
 def find_cameras(raise_when_empty=False, max_index_search_range=MAX_OPENCV_INDEX, mock=False) -> list[dict]:
     cameras = []
     if platform.system() == "Linux":
@@ -294,21 +300,37 @@ class OpenCVCamera:
 
             raise OSError(f"Can't access OpenCVCamera({camera_idx}).")
 
+        def log_camera_state(camera, stage: str):
+            actual_fps = camera.get(cv2.CAP_PROP_FPS)
+            actual_width = camera.get(cv2.CAP_PROP_FRAME_WIDTH)
+            actual_height = camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            actual_fourcc = camera.get(cv2.CAP_PROP_FOURCC)
+            print(
+                f"[opencv-debug] camera={self.camera_index} stage={stage} "
+                f"width={actual_width} height={actual_height} fps={actual_fps} "
+                f"fourcc={actual_fourcc}({_decode_fourcc(actual_fourcc)})"
+            )
+
         # Secondly, create the camera that will be used downstream.
         # Note: For some unknown reason, calling `isOpened` blocks the camera which then
         # needs to be re-created.
         self.camera = cv2.VideoCapture(camera_idx)
+        log_camera_state(self.camera, "after_open")
 
-        if self.fps is not None:
-            self.camera.set(cv2.CAP_PROP_FPS, self.fps)
         if self.width is not None:
             self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            log_camera_state(self.camera, "after_set_width")
         if self.height is not None:
             self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            log_camera_state(self.camera, "after_set_height")
+        if self.fps is not None:
+            self.camera.set(cv2.CAP_PROP_FPS, self.fps)
+            log_camera_state(self.camera, "after_set_fps")
 
         actual_fps = self.camera.get(cv2.CAP_PROP_FPS)
         actual_width = self.camera.get(cv2.CAP_PROP_FRAME_WIDTH)
         actual_height = self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        log_camera_state(self.camera, "before_validate")
 
         # Using `math.isclose` since actual fps can be a float (e.g. 29.9 instead of 30)
         if self.fps is not None and not math.isclose(self.fps, actual_fps, rel_tol=1e-3):

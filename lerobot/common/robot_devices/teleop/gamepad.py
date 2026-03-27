@@ -56,6 +56,8 @@ DEFAULT_BUTTON_MAP = SONY_BUTTON_MAP
 DEFAULT_AXIS_MAP = SONY_AXIS_MAP
 DEFAULT_HAT_MAP = SONY_HAT_MAP
 
+EE_SPEED_SCALE = 0.6
+
 
 class PiperTracIKKinematics:
     def __init__(
@@ -119,8 +121,9 @@ class SixAxisArmController:
         self.speeds = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.gripper_speed = 0.0
         self.control_mode = "joint"
-        self.pose_translation_step = 0.001
-        self.pose_rotation_step_deg = 0.5
+        # End-effector mode moves more stably with a reduced step size.
+        self.pose_translation_step = 0.001 * EE_SPEED_SCALE
+        self.pose_rotation_step_deg = 0.5 * EE_SPEED_SCALE
         self.pose_target = None
         self._last_debug_snapshot = None
         self._axis_filters = {
@@ -138,13 +141,15 @@ class SixAxisArmController:
             "rerecord_episode": False,
         }
 
+        # Keep software limits aligned with the Piper URDF so EE IK clipping
+        # matches the actual kinematic model used by the reference teleop code.
         self.joint_limits = [
-            (-92000 / 57324.840764, 92000 / 57324.840764),
-            (0 / 57324.840764, 170000 / 57324.840764),
-            (-80000 / 57324.840764, 0 / 57324.840764),
-            (-90000 / 57324.840764, 90000 / 57324.840764),
-            (-77000 / 57324.840764, 60000 / 57324.840764),
-            (-90000 / 57324.840764, 90000 / 57324.840764),
+            (-2.618, 2.618),
+            (0.0, 3.14),
+            (-2.967, 0.0),
+            (-1.745, 1.745),
+            (-1.22, 1.22),
+            (-2.967, 2.967),
         ]
         self.kinematic = self._init_kinematics()
         if self.kinematic is not None:
@@ -374,9 +379,11 @@ class SixAxisArmController:
             self._debug_input_and_mode(start_pressed, y_pressed, lb_pressed, rb_pressed)
 
             if rb_pressed and not self._last_rb_pressed:
+                print("[gamepad-event] RB pressed -> exit current phase early")
                 self._pending_events["exit_early"] = True
 
             if lb_pressed and not self._last_lb_pressed:
+                print("[gamepad-event] LB pressed -> rerecord current episode")
                 self._pending_events["rerecord_episode"] = True
                 self._pending_events["exit_early"] = True
 
@@ -424,6 +431,9 @@ class SixAxisArmController:
 
     def get_control_mode(self) -> str:
         return self.control_mode
+
+    def get_pose_target(self):
+        return None if self.pose_target is None else self.pose_target.copy()
 
     def stop(self):
         self.running = False

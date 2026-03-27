@@ -633,7 +633,7 @@ class PiperRobotConfig(RobotConfig):
         ),
         # Keep its resolution aligned with camera "one" so multi-camera training
         # does not fail on mismatched image shapes.
-        "two":OpenCVCameraConfig(
+        "two": OpenCVCameraConfig(
             camera_index=6,
             fps=30,
             width=640,

@@ -148,8 +148,16 @@ class PiperRobot:
 
         # do action
         before_write_t = time.perf_counter()
+        control_mode = self.teleop.get_control_mode()
         target_joints = list(action.values())
-        self.arm.write(target_joints)
+        if control_mode == "ee":
+            pose_target = self.teleop.get_pose_target()
+            if pose_target is not None:
+                self.arm.write_pose(pose_target, self.teleop.gripper)
+            else:
+                self.arm.write(target_joints)
+        else:
+            self.arm.write(target_joints)
         self.logs["write_pos_dt_s"] = time.perf_counter() - before_write_t
 
         if not record_data:

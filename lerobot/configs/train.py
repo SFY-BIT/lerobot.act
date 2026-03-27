@@ -21,6 +21,15 @@ from lerobot.configs.policies import PreTrainedConfig
 TRAIN_CONFIG_NAME = "train_config.json"
 
 
+def _looks_like_local_path(path_str: str) -> bool:
+    return (
+        os.path.sep in path_str
+        or (os.path.altsep is not None and os.path.altsep in path_str)
+        or path_str.startswith(".")
+        or path_str.startswith("~")
+    )
+
+
 @dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
@@ -147,13 +156,16 @@ class TrainPipelineConfig(HubMixin):
     ) -> "TrainPipelineConfig":
         model_id = str(pretrained_name_or_path)
         config_file: str | None = None
-        if Path(model_id).is_dir():
-            if TRAIN_CONFIG_NAME in os.listdir(model_id):
-                config_file = os.path.join(model_id, TRAIN_CONFIG_NAME)
+        local_path = Path(model_id).expanduser()
+        if local_path.is_dir():
+            if TRAIN_CONFIG_NAME in os.listdir(local_path):
+                config_file = os.path.join(local_path, TRAIN_CONFIG_NAME)
             else:
-                print(f"{TRAIN_CONFIG_NAME} not found in {Path(model_id).resolve()}")
-        elif Path(model_id).is_file():
-            config_file = model_id
+                print(f"{TRAIN_CONFIG_NAME} not found in {local_path.resolve()}")
+        elif local_path.is_file():
+            config_file = str(local_path)
+        elif _looks_like_local_path(model_id):
+            raise FileNotFoundError(f"Local pretrained path does not exist: {local_path.resolve()}")
         else:
             try:
                 config_file = hf_hub_download(
