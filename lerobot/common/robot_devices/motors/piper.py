@@ -172,8 +172,9 @@ class PiperMotorsBus:
 
     def read(self) -> Dict:
         """
-            - 机械臂关节消息,单位0.001度
-            - 机械臂夹爪消息
+            返回统一单位的机器人状态:
+            - joints: radians
+            - gripper: meters
         """
         joint_msg = self.piper.GetArmJointMsgs()
         joint_state = joint_msg.joint_state
@@ -182,13 +183,13 @@ class PiperMotorsBus:
         gripper_state = gripper_msg.gripper_state
         
         return {
-            "joint_1": joint_state.joint_1,
-            "joint_2": joint_state.joint_2,
-            "joint_3": joint_state.joint_3,
-            "joint_4": joint_state.joint_4,
-            "joint_5": joint_state.joint_5,
-            "joint_6": joint_state.joint_6,
-            "gripper": gripper_state.grippers_angle
+            "joint_1": joint_state.joint_1 / self.joint_factor,
+            "joint_2": joint_state.joint_2 / self.joint_factor,
+            "joint_3": joint_state.joint_3 / self.joint_factor,
+            "joint_4": joint_state.joint_4 / self.joint_factor,
+            "joint_5": joint_state.joint_5 / self.joint_factor,
+            "joint_6": joint_state.joint_6 / self.joint_factor,
+            "gripper": gripper_state.grippers_angle / 1_000_000,
         }
     
     def safe_disconnect(self):

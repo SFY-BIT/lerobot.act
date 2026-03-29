@@ -235,6 +235,9 @@ def control_loop(
     if isinstance(device, str):
         device = get_safe_torch_device(device)
 
+    if policy is not None and hasattr(policy, "reset"):
+        policy.reset()
+
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:

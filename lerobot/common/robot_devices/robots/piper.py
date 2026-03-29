@@ -37,6 +37,8 @@ class PiperRobot:
         
         self.logs = {}
         self.is_connected = False
+        self.policy_joint_delta_limit = 0.05
+        self.policy_gripper_delta_limit = 0.01
 
     @property
     def camera_features(self) -> dict:
@@ -193,11 +195,22 @@ class PiperRobot:
                 "Piper is not connected. You need to run `robot.connect()`."
             )
 
-        # send to motors, torch to list
         target_joints = action.tolist()
+        current_state = list(self.arm.read().values())
+
+        clipped_action = []
+        for idx, (target, current) in enumerate(zip(target_joints, current_state, strict=True)):
+            max_delta = self.policy_gripper_delta_limit if idx == len(target_joints) - 1 else self.policy_joint_delta_limit
+            clipped_action.append(float(np.clip(target, current - max_delta, current + max_delta)))
+
+        self.logs["policy_action_raw"] = target_joints
+        self.logs["policy_action_clipped"] = clipped_action
+
+        # send to motors, torch to list
+        target_joints = clipped_action
         self.arm.write(target_joints)
 
-        return action
+        return torch.as_tensor(target_joints, dtype=action.dtype)
 
 
 
