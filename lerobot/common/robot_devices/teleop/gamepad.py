@@ -1,7 +1,10 @@
+import json
+import math
 import os
 import pygame
 import threading
 import time
+from pathlib import Path
 from typing import Dict
 
 try:
@@ -57,6 +60,177 @@ DEFAULT_AXIS_MAP = SONY_AXIS_MAP
 DEFAULT_HAT_MAP = SONY_HAT_MAP
 
 EE_SPEED_SCALE = 0.6
+
+
+def _detect_default_leader_port() -> str:
+    for env_name in ["LEROBOT_SO101_PORT", "LEROBOT_LEADER_PORT", "LEROBOT_SO100_PORT"]:
+        env_value = os.getenv(env_name)
+        if env_value:
+            return env_value
+
+    try:
+        from serial.tools import list_ports
+
+        ports = list(list_ports.comports())
+        if ports:
+            preferred = []
+            for port in ports:
+                description = f"{port.description} {port.manufacturer or ''}".lower()
+                if any(token in description for token in ["usb", "serial", "ch340", "cp210", "ftdi"]):
+                    preferred.append(port.device)
+            if preferred:
+                return preferred[0]
+            return ports[0].device
+    except Exception:
+        pass
+
+    return "COM3"
+
+
+def _candidate_so101_calibration_paths() -> list[Path]:
+    explicit = os.getenv("LEROBOT_SO101_CALIBRATION")
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+
+    candidates.extend(
+        [
+            Path(".cache/calibration/so101/main_leader.json"),
+            Path(".cache/calibration/so100/main_leader.json"),
+            Path.home() / ".cache" / "huggingface" / "lerobot" / "calibration" / "teleoperators" / "so101_leader" / "main.json",
+            Path.home() / ".cache" / "huggingface" / "lerobot" / "calibration" / "teleoperators" / "so100_leader" / "main.json",
+        ]
+    )
+    return candidates
+
+
+def _load_so101_calibration(calibration: str | os.PathLike | dict | None) -> tuple[dict | None, Path | None]:
+    if isinstance(calibration, dict):
+        return calibration, None
+
+    if calibration is not None:
+        path = Path(calibration).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Leader calibration file not found: {path}")
+        with open(path, encoding="utf-8") as f:
+            return json.load(f), path
+
+    for candidate in _candidate_so101_calibration_paths():
+        if candidate.exists():
+            with open(candidate, encoding="utf-8") as f:
+                return json.load(f), candidate
+
+    return None, None
+
+
+class _SO101LeaderController:
+    """Leader-arm reader that mimics the gamepad controller interface used by PiperRobot."""
+
+    def __init__(self, port: str | None = None, calibration: str | os.PathLike | dict | None = None, use_degrees: bool = False):
+        self.port = port or _detect_default_leader_port()
+        self.use_degrees = use_degrees
+        self.calibration, self.calibration_path = _load_so101_calibration(calibration)
+        self.bus = None
+        self.control_mode = "joint"
+        self.pose_target = None
+        self.gripper = 0.0
+        self._pending_events = {
+            "exit_early": False,
+            "rerecord_episode": False,
+        }
+
+    def connect(self):
+        if self.bus is not None and self.bus.is_connected:
+            return
+
+        from lerobot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
+        from lerobot.common.robot_devices.motors.feetech import FeetechMotorsBus
+
+        config = FeetechMotorsBusConfig(
+            port=self.port,
+            motors={
+                "shoulder_pan": (1, "sts3215"),
+                "shoulder_lift": (2, "sts3215"),
+                "elbow_flex": (3, "sts3215"),
+                "wrist_flex": (4, "sts3215"),
+                "wrist_roll": (5, "sts3215"),
+                "gripper": (6, "sts3215"),
+            },
+        )
+        self.bus = FeetechMotorsBus(config)
+        self.bus.connect()
+
+        if self.calibration is None:
+            raise FileNotFoundError(
+                "SO101 leader calibration file was not found. "
+                "Set LEROBOT_SO101_CALIBRATION or place a calibration file in .cache/calibration/so100/main_leader.json."
+            )
+
+        self.bus.set_calibration(self.calibration)
+
+    def _read_leader_state(self) -> dict[str, float]:
+        if self.bus is None or not self.bus.is_connected:
+            self.connect()
+
+        values = self.bus.read("Present_Position")
+        if hasattr(values, "tolist"):
+            values = values.tolist()
+
+        return dict(zip(self.bus.motor_names, values, strict=True))
+
+    def _map_so101_to_piper(self, state: dict[str, float]) -> Dict:
+        # Feetech leader readings are calibrated to degrees for rotational joints and [0, 100] for the gripper.
+        joint_deg = [
+            state["shoulder_pan"],
+            state["shoulder_lift"],
+            state["elbow_flex"],
+            state["wrist_flex"],
+            0.0,
+            state["wrist_roll"],
+        ]
+        joint_rad = [math.radians(value) for value in joint_deg]
+        gripper_m = max(0.0, min(0.08, state["gripper"] / 100.0 * 0.08))
+        self.gripper = gripper_m
+
+        return {
+            "joint0": joint_rad[0],
+            "joint1": joint_rad[1],
+            "joint2": joint_rad[2],
+            "joint3": joint_rad[3],
+            "joint4": joint_rad[4],
+            "joint5": joint_rad[5],
+            "gripper": gripper_m,
+        }
+
+    def get_action(self) -> Dict:
+        return self._map_so101_to_piper(self._read_leader_state())
+
+    def get_control_mode(self) -> str:
+        return self.control_mode
+
+    def get_pose_target(self):
+        return None
+
+    def consume_control_events(self) -> dict[str, bool]:
+        return dict(self._pending_events)
+
+    def go_home(self):
+        pass
+
+    def reset(self):
+        pass
+
+    def stop(self):
+        if self.bus is not None and self.bus.is_connected:
+            self.bus.disconnect()
+
+
+def SixAxisArmController_101(
+    port: str | None = None,
+    calibration: str | os.PathLike | dict | None = None,
+    use_degrees: bool = False,
+):
+    return _SO101LeaderController(port=port, calibration=calibration, use_degrees=use_degrees)
 
 
 class PiperTracIKKinematics:

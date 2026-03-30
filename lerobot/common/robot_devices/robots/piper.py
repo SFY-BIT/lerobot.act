@@ -7,7 +7,7 @@ import torch
 import numpy as np
 from dataclasses import dataclass, field, replace
 
-from lerobot.common.robot_devices.teleop.gamepad import SixAxisArmController
+from lerobot.common.robot_devices.teleop.gamepad import SixAxisArmController_101
 from lerobot.common.robot_devices.motors.utils import get_motor_names, make_motors_buses_from_configs
 from lerobot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from lerobot.common.robot_devices.utils import RobotDeviceAlreadyConnectedError, RobotDeviceNotConnectedError
@@ -31,7 +31,7 @@ class PiperRobot:
         
         # build gamepad teleop
         if not self.inference_time:
-            self.teleop = SixAxisArmController()
+            self.teleop = SixAxisArmController_101()
         else:
             self.teleop = None
         
@@ -90,6 +90,9 @@ class PiperRobot:
         self.arm.connect(enable=True)
         print("piper conneted")
 
+        if self.teleop is not None and hasattr(self.teleop, "connect"):
+            self.teleop.connect()
+
         # connect cameras
         for name in self.cameras:
             self.cameras[name].connect()
@@ -140,7 +143,7 @@ class PiperRobot:
             raise ConnectionError()
         
         if self.teleop is None and self.inference_time:
-            self.teleop = SixAxisArmController()
+            self.teleop = SixAxisArmController_101()
 
         # read target pose state as 
         before_read_t = time.perf_counter()
