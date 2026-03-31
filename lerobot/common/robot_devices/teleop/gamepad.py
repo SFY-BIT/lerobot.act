@@ -1,11 +1,18 @@
 import json
 import math
 import os
+import time
 import pygame
 import threading
-import time
 from pathlib import Path
 from typing import Dict
+
+try:
+    from pynput import keyboard as pynput_keyboard
+    PYNPUT_AVAILABLE = True
+except ImportError:
+    pynput_keyboard = None
+    PYNPUT_AVAILABLE = False
 
 try:
     import numpy as np
@@ -60,31 +67,68 @@ DEFAULT_AXIS_MAP = SONY_AXIS_MAP
 DEFAULT_HAT_MAP = SONY_HAT_MAP
 
 EE_SPEED_SCALE = 0.6
+DEFAULT_SO101_LEADER_PORT = "/dev/ttyACM0"
+DEFAULT_SO101_CALIBRATION = Path(
+    "/home/night/.cache/huggingface/lerobot/calibration/teleoperators/so101_leader/R07252801.json"
+)
+JOINT0_OFFSET_DEG = 90.0
+JOINT2_ZERO_DEG = 78.0
+JOINT4_ZERO_DEG = 223.0
+JOINT5_ZERO_DEG = 32.0
+JOINT1_SMOOTHING_ALPHA = 0.35
+PIPER_JOINT_LIMITS_RAD = [
+    (-2.618, 2.618),
+    (0.0, 3.14),
+    (-2.967, 0.0),
+    (-1.745, 1.745),
+    (-1.22, 1.22),
+    (-2.967, 2.967),
+]
+PIPER_JOINT_LIMITS_DEG = [(math.degrees(lower), math.degrees(upper)) for lower, upper in PIPER_JOINT_LIMITS_RAD]
+DEBUG_SO101_MAPPING = os.getenv("LEROBOT_DEBUG_SO101_MAPPING", "0") == "1"
+DEBUG_PRINT_INTERVAL_S = 0.2
+SO101_MOTOR_NAMES = [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+]
 
 
 def _detect_default_leader_port() -> str:
-    for env_name in ["LEROBOT_SO101_PORT", "LEROBOT_LEADER_PORT", "LEROBOT_SO100_PORT"]:
-        env_value = os.getenv(env_name)
-        if env_value:
-            return env_value
+    return DEFAULT_SO101_LEADER_PORT
 
-    try:
-        from serial.tools import list_ports
 
-        ports = list(list_ports.comports())
-        if ports:
-            preferred = []
-            for port in ports:
-                description = f"{port.description} {port.manufacturer or ''}".lower()
-                if any(token in description for token in ["usb", "serial", "ch340", "cp210", "ftdi"]):
-                    preferred.append(port.device)
-            if preferred:
-                return preferred[0]
-            return ports[0].device
-    except Exception:
-        pass
+def _is_legacy_so101_calibration(calibration: dict) -> bool:
+    required_keys = {"homing_offset", "drive_mode", "start_pos", "end_pos", "calib_mode", "motor_names"}
+    return required_keys.issubset(calibration.keys())
 
-    return "COM3"
+
+def _is_full_so101_calibration(calibration: dict) -> bool:
+    return all(name in calibration and isinstance(calibration[name], dict) for name in SO101_MOTOR_NAMES)
+
+
+def _convert_full_so101_calibration(calibration: dict) -> dict:
+    return {
+        "homing_offset": [calibration[name]["homing_offset"] for name in SO101_MOTOR_NAMES],
+        "drive_mode": [calibration[name]["drive_mode"] for name in SO101_MOTOR_NAMES],
+        "start_pos": [calibration[name]["range_min"] for name in SO101_MOTOR_NAMES],
+        "end_pos": [calibration[name]["range_max"] for name in SO101_MOTOR_NAMES],
+        "calib_mode": ["DEGREE", "DEGREE", "DEGREE", "DEGREE", "DEGREE", "LINEAR"],
+        "motor_names": SO101_MOTOR_NAMES,
+    }
+
+
+def _normalize_so101_calibration(calibration: dict) -> dict:
+    if _is_legacy_so101_calibration(calibration):
+        return calibration
+
+    if _is_full_so101_calibration(calibration):
+        return _convert_full_so101_calibration(calibration)
+
+    raise ValueError("Unsupported SO101 calibration format.")
 
 
 def _candidate_so101_calibration_paths() -> list[Path]:
@@ -95,6 +139,7 @@ def _candidate_so101_calibration_paths() -> list[Path]:
 
     candidates.extend(
         [
+            DEFAULT_SO101_CALIBRATION,
             Path(".cache/calibration/so101/main_leader.json"),
             Path(".cache/calibration/so100/main_leader.json"),
             Path.home() / ".cache" / "huggingface" / "lerobot" / "calibration" / "teleoperators" / "so101_leader" / "main.json",
@@ -106,21 +151,36 @@ def _candidate_so101_calibration_paths() -> list[Path]:
 
 def _load_so101_calibration(calibration: str | os.PathLike | dict | None) -> tuple[dict | None, Path | None]:
     if isinstance(calibration, dict):
-        return calibration, None
+        return _normalize_so101_calibration(calibration), None
 
     if calibration is not None:
         path = Path(calibration).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"Leader calibration file not found: {path}")
         with open(path, encoding="utf-8") as f:
-            return json.load(f), path
+            return _normalize_so101_calibration(json.load(f)), path
 
     for candidate in _candidate_so101_calibration_paths():
         if candidate.exists():
             with open(candidate, encoding="utf-8") as f:
-                return json.load(f), candidate
+                return _normalize_so101_calibration(json.load(f)), candidate
 
     return None, None
+
+
+def _wrap_deg(value: float) -> float:
+    """Wrap angles into [-180, 180) to keep leader cross-zero jumps continuous."""
+    return (value + 180.0) % 360.0 - 180.0
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _unwrap_near_reference(value: float, reference: float) -> float:
+    """Return the angle equivalent to value that is closest to reference."""
+    candidates = (value - 360.0, value, value + 360.0)
+    return min(candidates, key=lambda candidate: abs(candidate - reference))
 
 
 class _SO101LeaderController:
@@ -134,10 +194,28 @@ class _SO101LeaderController:
         self.control_mode = "joint"
         self.pose_target = None
         self.gripper = 0.0
+        self._last_debug_print_t = 0.0
+        self._last_debug_signature = None
+        self._last_joint2_deg = None
+        self._last_joint1_deg = None
         self._pending_events = {
             "exit_early": False,
             "rerecord_episode": False,
         }
+        self._keyboard_listener = None
+
+        if PYNPUT_AVAILABLE:
+            self._keyboard_listener = pynput_keyboard.Listener(on_press=self._on_key_press)
+            self._keyboard_listener.start()
+
+    def _on_key_press(self, key):
+        try:
+            if hasattr(key, "char") and key.char == "q":
+                self._pending_events["exit_early"] = True
+                return False
+        except Exception:
+            return None
+        return None
 
     def connect(self):
         if self.bus is not None and self.bus.is_connected:
@@ -180,13 +258,34 @@ class _SO101LeaderController:
 
     def _map_so101_to_piper(self, state: dict[str, float]) -> Dict:
         # Feetech leader readings are calibrated to degrees for rotational joints and [0, 100] for the gripper.
+        joint1_deg_raw = state["shoulder_lift"]
+        if self._last_joint1_deg is None:
+            joint1_deg = joint1_deg_raw
+        else:
+            joint1_deg = (
+                (1.0 - JOINT1_SMOOTHING_ALPHA) * self._last_joint1_deg
+                + JOINT1_SMOOTHING_ALPHA * joint1_deg_raw
+            )
+        self._last_joint1_deg = joint1_deg
+
+        elbow_deg_raw = state["elbow_flex"] - JOINT2_ZERO_DEG
+        if self._last_joint2_deg is None:
+            elbow_deg = _wrap_deg(elbow_deg_raw)
+        else:
+            elbow_deg = _unwrap_near_reference(elbow_deg_raw, self._last_joint2_deg)
+        elbow_deg = _clamp(elbow_deg, *PIPER_JOINT_LIMITS_DEG[2])
+        self._last_joint2_deg = elbow_deg
         joint_deg = [
-            state["shoulder_pan"],
-            state["shoulder_lift"],
-            state["elbow_flex"],
-            state["wrist_flex"],
+            -(state["shoulder_pan"] - JOINT0_OFFSET_DEG),
+            joint1_deg,
+            elbow_deg,
             0.0,
-            state["wrist_roll"],
+            _wrap_deg(state["wrist_flex"] - JOINT4_ZERO_DEG),
+            -_wrap_deg(state["wrist_roll"] - JOINT5_ZERO_DEG),
+        ]
+        joint_deg = [
+            _clamp(value, lower_deg, upper_deg)
+            for value, (lower_deg, upper_deg) in zip(joint_deg, PIPER_JOINT_LIMITS_DEG, strict=True)
         ]
         joint_rad = [math.radians(value) for value in joint_deg]
         gripper_m = max(0.0, min(0.08, state["gripper"] / 100.0 * 0.08))
@@ -202,8 +301,29 @@ class _SO101LeaderController:
             "gripper": gripper_m,
         }
 
+    def _debug_print_mapping(self, state: dict[str, float], action: dict[str, float]) -> None:
+        if not DEBUG_SO101_MAPPING:
+            return
+
+        signature = tuple(round(state[name], 1) for name in SO101_MOTOR_NAMES)
+        now = time.perf_counter()
+        if signature == self._last_debug_signature and now - self._last_debug_print_t < DEBUG_PRINT_INTERVAL_S:
+            return
+
+        joint_deg = {f"joint{i}": round(math.degrees(action[f"joint{i}"]), 1) for i in range(6)}
+        state_fmt = " ".join(f"{name}={state[name]:+.1f}" for name in SO101_MOTOR_NAMES)
+        action_fmt = " ".join(f"{name}={value:+.1f}" for name, value in joint_deg.items())
+        print(f"[so101-state] {state_fmt}")
+        print(f"[piper-map] {action_fmt} gripper={action['gripper']:.4f}")
+
+        self._last_debug_signature = signature
+        self._last_debug_print_t = now
+
     def get_action(self) -> Dict:
-        return self._map_so101_to_piper(self._read_leader_state())
+        state = self._read_leader_state()
+        action = self._map_so101_to_piper(state)
+        self._debug_print_mapping(state, action)
+        return action
 
     def get_control_mode(self) -> str:
         return self.control_mode
@@ -221,6 +341,9 @@ class _SO101LeaderController:
         pass
 
     def stop(self):
+        if self._keyboard_listener is not None:
+            self._keyboard_listener.stop()
+            self._keyboard_listener = None
         if self.bus is not None and self.bus.is_connected:
             self.bus.disconnect()
 
