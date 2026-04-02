@@ -1,0 +1,81 @@
+当前仓库相较于最初拉下来的 git 版本，已确认的改动如下。
+
+1. 文件：lerobot/common/datasets/video_utils.py
+
+- 新增了 PyAV 兜底解码逻辑。
+- 原始代码默认依赖 torchvision.io.VideoReader 读取视频帧。
+- 由于当前环境中一度出现 torchvision 缺少 VideoReader / VideoReader 初始化失败的问题，训练在读取视频数据时会直接报错。
+- 现在的实现改为：
+  - 如果 torchvision.io.VideoReader 可用，则继续走原来的逻辑。
+  - 如果不可用，或者初始化失败，则自动回退到 PyAV 解码。
+- 额外抽出了 `_finalize_video_frames(...)`，把“按时间戳选最近帧 + 容差校验 + 转 float32/归一化”的公共逻辑收敛到一个函数里。
+
+影响：
+- 提高了视频读取兼容性。
+- 对当前训练链路是必要修复。
+- 即使后续 torchvision 恢复正常，这个 fallback 也仍然可以作为安全兜底保留。
+
+
+2. 文件：lerobot/common/datasets/lerobot_dataset.py
+
+- 修改了 `_get_query_timestamps(...)` 和 `_query_hf_dataset(...)` 中对 HuggingFace datasets 返回列的处理方式。
+- 原始代码直接把 `self.hf_dataset.select(...)[key]` 传给 `torch.stack(...)`。
+- 在当前环境下，这里返回的是 `datasets.arrow_dataset.Column`，其元素虽然是 Tensor，但 Column 本身不能直接传给 `torch.stack`，会报：
+  `TypeError: stack(): argument 'tensors' must be tuple of Tensors, not Column`
+- 现在改为先显式转成 `list(...)`，再执行 `torch.stack(...)`。
+
+影响：
+- 修复了训练循环进入 dataloader 后的兼容性错误。
+- 属于与当前 datasets / torch 组合相关的兼容性补丁。
+
+
+3. 文件：安装.txt
+
+- 原始内容更偏向直接使用导出的环境文件 / requirements 重建环境。
+- 现已改成推荐的实际安装流程说明，核心改动包括：
+  - 推荐新建干净 conda 环境。
+  - 推荐在仓库根目录执行 `pip install -e .` 安装当前源码。
+  - 保留 Linux 下 `ffmpeg` / `opencv` 的 conda 安装说明。
+  - 补充 Piper 相关依赖安装说明。
+  - 明确说明不要再使用 `conda env export` / `pip freeze` 导出的快照环境作为项目正式安装方式。
+  - 说明此前环境冲突的根源：导出的依赖约束与当前仓库源码要求不一致，尤其是 diffusers / lerobot 的版本关系。
+
+影响：
+- 这个改动主要是文档层面的安装指引修正，不改变运行时代码逻辑。
+- 能减少后续重复踩环境冲突问题。
+
+
+4. 本次排查过程中确认但未直接改动模型结构的事项
+
+- 没有修改 ACT 模型结构本身，也没有改动 `lerobot/common/policies/act/modeling_act.py` 的网络定义。
+- 没有改动 Piper 控制逻辑本身来适配训练，只做了数据读取和环境兼容层面的修复。
+
+
+5. 与仓库文件无关、但本次实际环境中做过的重要运行层调整
+
+以下事项不是 git 文件改动，但对当前训练可跑通有直接影响：
+
+- 将 PyTorch / torchvision 重装为可正常使用 CUDA 的组合：
+  - torch 2.6.0+cu124
+  - torchvision 0.21.0+cu124
+- 验证了当前训练在物理 GPU1 上可正常运行。
+- 验证了本地数据集 `data_piper_multi_record_act` 已可被训练脚本正确读取。
+- 验证了 1-step smoke test 能正常进入训练并结束。
+
+
+6. 当前建议保留的改动
+
+- `lerobot/common/datasets/video_utils.py` 的 PyAV fallback：建议保留。
+- `lerobot/common/datasets/lerobot_dataset.py` 的 Column -> list -> torch.stack 兼容修复：建议保留。
+- `安装.txt` 的安装说明修订：建议保留。
+
+
+7. 当前结论
+
+相较于原始仓库，当前真正落到 git 工作区里的主要修改，核心就是这 3 个文件：
+
+- lerobot/common/datasets/video_utils.py
+- lerobot/common/datasets/lerobot_dataset.py
+- 安装.txt
+
+其中前两个属于“训练/数据读取兼容性修复”，第三个属于“安装文档修订”。

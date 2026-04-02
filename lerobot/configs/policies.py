@@ -1,7 +1,9 @@
 import abc
 import json
+import logging
 import os
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Type, TypeVar
 
@@ -34,6 +36,60 @@ def _load_config_dict(config_file: str) -> dict | None:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _get_dataclass_field_names(config_cls: type) -> set[str]:
+    if not is_dataclass(config_cls):
+        return set()
+    return {field_info.name for field_info in fields(config_cls)}
+
+
+def _filter_config_dict(config_data: dict, allowed_keys: set[str], *, keep_type: bool) -> tuple[dict, list[str]]:
+    filtered = {}
+    removed_keys = []
+
+    for key, value in config_data.items():
+        if key in allowed_keys or (keep_type and key == "type"):
+            filtered[key] = value
+        else:
+            removed_keys.append(key)
+
+    return filtered, removed_keys
+
+
+def _parse_config_with_compatibility_fallback(
+    parse_cls: type,
+    config_file: str,
+    cli_overrides: list[str],
+    config_data: dict | None,
+    *,
+    allowed_keys: set[str],
+    keep_type: bool,
+):
+    try:
+        return draccus.parse(parse_cls, config_file, args=cli_overrides)
+    except Exception:
+        if not isinstance(config_data, dict) or not allowed_keys:
+            raise
+
+        filtered_config, removed_keys = _filter_config_dict(config_data, allowed_keys, keep_type=keep_type)
+        if not removed_keys:
+            raise
+
+        logging.warning(
+            "Ignoring unsupported config keys while loading %s: %s",
+            config_file,
+            ", ".join(sorted(removed_keys)),
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp_file:
+            json.dump(filtered_config, tmp_file, indent=4)
+            tmp_path = tmp_file.name
+
+        try:
+            return draccus.parse(parse_cls, tmp_path, args=cli_overrides)
+        finally:
+            os.unlink(tmp_path)
 
 
 @dataclass
@@ -174,7 +230,14 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
             for choice_name in cls.get_known_choices():
                 subcls = cls.get_choice_class(choice_name)
                 try:
-                    return draccus.parse(subcls, config_file, args=cli_overrides)
+                    return _parse_config_with_compatibility_fallback(
+                        subcls,
+                        config_file,
+                        cli_overrides,
+                        config_data,
+                        allowed_keys=_get_dataclass_field_names(subcls),
+                        keep_type=False,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     parse_errors.append(f"{choice_name}: {exc}")
 
@@ -183,4 +246,31 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
                 f"Tried choices: {', '.join(parse_errors)}"
             )
 
-        return draccus.parse(cls, config_file, args=cli_overrides)
+        if isinstance(config_data, dict) and cls is not PreTrainedConfig:
+            return _parse_config_with_compatibility_fallback(
+                cls,
+                config_file,
+                cli_overrides,
+                config_data,
+                allowed_keys=_get_dataclass_field_names(cls),
+                keep_type=False,
+            )
+
+        allowed_keys = set()
+        keep_type = False
+        if isinstance(config_data, dict) and "type" in config_data:
+            import lerobot.common.policies  # noqa: F401
+
+            choice_name = config_data["type"]
+            if choice_name in cls.get_known_choices():
+                allowed_keys = _get_dataclass_field_names(cls.get_choice_class(choice_name))
+                keep_type = True
+
+        return _parse_config_with_compatibility_fallback(
+            cls,
+            config_file,
+            cli_overrides,
+            config_data,
+            allowed_keys=allowed_keys,
+            keep_type=keep_type,
+        )

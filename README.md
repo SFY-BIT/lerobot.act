@@ -25,7 +25,7 @@ conda install "opencv>=4.10.0"
 
 Install Piper:  
 ```bash
-pip install python-can
+
 pip install piper_sdk
 sudo apt update && sudo apt install can-utils ethtool
 pip install pygame

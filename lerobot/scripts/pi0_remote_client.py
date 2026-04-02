@@ -12,7 +12,7 @@ from lerobot.common.robot_devices.robots.utils import make_robot
 from lerobot.common.robot_devices.utils import busy_wait
 
 
-DROP_JOINT_INDEX = 3
+DEFAULT_DROP_JOINT_INDEX = 3
 DEFAULT_CAMERA_MAPPING = {
     "observation.images.one": "observation.images.camera0",
     "observation.images.two": "observation.images.camera1",
@@ -34,19 +34,43 @@ def parse_camera_mappings(values: list[str] | None) -> dict[str, str]:
     return mapping
 
 
-def compress_state(full_state: list[float]) -> list[float]:
-    return [value for idx, value in enumerate(full_state) if idx != DROP_JOINT_INDEX]
+def compress_state(full_state: list[float], drop_joint_index: int) -> list[float]:
+    if not 0 <= drop_joint_index < len(full_state):
+        raise ValueError(
+            f"drop_joint_index={drop_joint_index} is out of range for local state dimension {len(full_state)}."
+        )
+
+    compact_state = [value for idx, value in enumerate(full_state) if idx != drop_joint_index]
+    if len(compact_state) != len(full_state) - 1:
+        raise RuntimeError(
+            f"Expected compact state dimension {len(full_state) - 1}, got {len(compact_state)} after dropping "
+            f"index {drop_joint_index}."
+        )
+    return compact_state
 
 
-def expand_action(compact_action: list[float], fixed_joint4: float) -> list[float]:
-    if len(compact_action) != 6:
-        raise ValueError(f"Expected 6-D action from pi0 server, got {len(compact_action)} values.")
+def expand_action(
+    compact_action: list[float],
+    dropped_joint_value: float,
+    full_action_dim: int,
+    drop_joint_index: int,
+) -> list[float]:
+    expected_compact_dim = full_action_dim - 1
+    if len(compact_action) != expected_compact_dim:
+        raise ValueError(
+            f"Expected {expected_compact_dim}-D action from pi0 server for local action dimension "
+            f"{full_action_dim}, got {len(compact_action)} values."
+        )
+    if not 0 <= drop_joint_index < full_action_dim:
+        raise ValueError(
+            f"drop_joint_index={drop_joint_index} is out of range for local action dimension {full_action_dim}."
+        )
 
     full_action = []
     compact_idx = 0
-    for full_idx in range(7):
-        if full_idx == DROP_JOINT_INDEX:
-            full_action.append(float(fixed_joint4))
+    for full_idx in range(full_action_dim):
+        if full_idx == drop_joint_index:
+            full_action.append(float(dropped_joint_value))
         else:
             full_action.append(float(compact_action[compact_idx]))
             compact_idx += 1
@@ -57,9 +81,10 @@ def build_request(
     observation: dict[str, Any],
     task: str,
     camera_mapping: dict[str, str],
-) -> tuple[dict[str, Any], float]:
+    drop_joint_index: int,
+) -> tuple[dict[str, Any], float, int]:
     full_state = observation["observation.state"].tolist()
-    fixed_joint4 = float(full_state[DROP_JOINT_INDEX])
+    dropped_joint_value = float(full_state[drop_joint_index])
 
     images: dict[str, Any] = {}
     for local_key, remote_key in camera_mapping.items():
@@ -76,10 +101,10 @@ def build_request(
     payload = {
         "type": "infer",
         "task": task,
-        "state": compress_state(full_state),
+        "state": compress_state(full_state, drop_joint_index),
         "images": images,
     }
-    return payload, fixed_joint4
+    return payload, dropped_joint_value, len(full_state)
 
 
 def main() -> None:
@@ -99,15 +124,27 @@ def main() -> None:
     )
     parser.add_argument(
         "--fixed-joint4",
+        "--fixed-dropped-joint-value",
         type=float,
+        dest="fixed_dropped_joint_value",
         default=None,
-        help="Optional constant to hold joint_4 at instead of using the initial observed value.",
+        help="Optional constant to hold the dropped joint at instead of using the initial observed value.",
+    )
+    parser.add_argument(
+        "--drop-joint-index",
+        type=int,
+        default=DEFAULT_DROP_JOINT_INDEX,
+        help="Index of the local joint dimension to drop before sending the state to the 6-D pi0 policy.",
     )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     camera_mapping = parse_camera_mappings(args.camera_mapping)
+    logging.info(
+        "Using local->remote joint adapter: drop local index %s so 7-D local state/action maps to 6-D pi0.",
+        args.drop_joint_index,
+    )
     robot = make_robot(args.robot_type, inference_time=True)
     robot.connect()
 
@@ -123,22 +160,32 @@ def main() -> None:
 
         start_t = time.perf_counter()
         step_idx = 0
-        fixed_joint4 = args.fixed_joint4
+        fixed_dropped_joint_value = args.fixed_dropped_joint_value
 
         while time.perf_counter() - start_t < args.duration_s:
             loop_start_t = time.perf_counter()
 
             observation = robot.capture_observation()
-            request, inferred_joint4 = build_request(observation, args.task, camera_mapping)
-            if fixed_joint4 is None:
-                fixed_joint4 = inferred_joint4
+            request, inferred_dropped_joint_value, full_state_dim = build_request(
+                observation,
+                args.task,
+                camera_mapping,
+                args.drop_joint_index,
+            )
+            if fixed_dropped_joint_value is None:
+                fixed_dropped_joint_value = inferred_dropped_joint_value
 
             socket.send_pyobj(request)
             reply = socket.recv_pyobj()
             if reply.get("status") != "ok":
                 raise RuntimeError(f"Remote inference failed: {reply}")
 
-            full_action = expand_action(reply["action"], fixed_joint4)
+            full_action = expand_action(
+                reply["action"],
+                fixed_dropped_joint_value,
+                full_state_dim,
+                args.drop_joint_index,
+            )
             robot.send_action(torch.tensor(full_action, dtype=torch.float32))
 
             dt_s = time.perf_counter() - loop_start_t

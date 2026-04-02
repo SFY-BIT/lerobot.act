@@ -161,12 +161,24 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         super().__init__(config=config)
         self.config = config
         self.paligemma = PaliGemmaForConditionalGeneration(config=config.paligemma_config)
+        self._attach_paligemma_compat_aliases()
         self.gemma_expert = GemmaForCausalLM(config=config.gemma_expert_config)
         # Remove unused embed_tokens
         self.gemma_expert.model.embed_tokens = None
 
         self.to_bfloat16_like_physical_intelligence()
         self.set_requires_grad()
+
+    def _attach_paligemma_compat_aliases(self):
+        paligemma_core = getattr(self.paligemma, "model", None)
+        if paligemma_core is None:
+            return
+
+        # Newer transformers nest these modules under `.model`, while the converted pi0
+        # checkpoints and the original LeRobot integration expect them at the top level.
+        for attr_name in ("vision_tower", "multi_modal_projector", "language_model"):
+            if not hasattr(self.paligemma, attr_name) and hasattr(paligemma_core, attr_name):
+                setattr(self.paligemma, attr_name, getattr(paligemma_core, attr_name))
 
     def set_requires_grad(self):
         if self.config.freeze_vision_encoder:

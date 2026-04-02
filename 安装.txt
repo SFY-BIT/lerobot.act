@@ -1,12 +1,53 @@
- conda activate lerobot
+推荐安装方式（不要使用 `conda env export` + `pip freeze` 生成的 `lerobot_env.yaml` / `lerobot_requirements.txt` 重新创建环境，否则很容易出现依赖冲突）。
+
+1. 新建干净环境
+
+```bash
+conda create -y -n lerobot python=3.10
+conda activate lerobot
+```
+
+2. 在仓库根目录安装当前源码
+
+```bash
+cd /mnt/hdd/sfy/lerobot.act
+pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+3. Linux 下安装 ffmpeg 和 opencv
+
+```bash
+conda install -c conda-forge ffmpeg
+pip uninstall -y opencv-python
+conda install "opencv>=4.10.0"
+```
+
+4. 如果要使用 Piper，再安装这些依赖
+
+```bash
+pip install python-can
+pip install piper_sdk
+pip install pygame
+sudo apt update && sudo apt install can-utils ethtool
+```
+
+5. 不要再执行下面这类命令来重建项目环境
+
+```bash
 conda env export -n lerobot --no-builds > lerobot_env.yaml
 pip freeze > lerobot_requirements.txt
-
-
-
 conda env create -f lerobot_env.yaml
-conda activate lerobot
-cd lerobot_piper
-pip install -e .
-
 pip install -r lerobot_requirements.txt
+```
+
+原因：
+
+- 这些导出的文件会把你当前机器里的所有版本全部锁死。
+- 你当前导出的环境里包含 `diffusers==0.37.0`。
+- 但 `pip` 安装的 `lerobot==0.1.0` 又声明依赖 `diffusers<0.27.0`，因此解析失败。
+- 当前仓库源码自己的 `pyproject.toml` 要求是 `diffusers>=0.27.2`，和 PyPI 上那个旧版 `lerobot` 约束并不一致。
+
+结论：
+
+- 这个仓库应该优先用 `pip install -e .` 安装本地源码。
+- 不要再用导出的 `lerobot_env.yaml` 作为项目的正式安装方式。
