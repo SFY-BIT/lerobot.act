@@ -1,6 +1,6 @@
 import cv2
 
-cap = cv2.VideoCapture(7)   # 0 改成你的相机编号
+cap = cv2.VideoCapture(6)   # 0 改成你的相机编号
 
 if not cap.isOpened():
     print("相机打开失败")

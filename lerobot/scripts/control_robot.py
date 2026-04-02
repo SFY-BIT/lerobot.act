@@ -229,6 +229,21 @@ def record(
     cfg: RecordControlConfig,
 ) -> LeRobotDataset:
     # TODO(rcadene): Add option to record logs
+    if cfg.policy is not None and hasattr(robot, "policy_compact_joint4"):
+        state_shape = cfg.policy.input_features.get("observation.state")
+        action_shape = cfg.policy.output_features.get("action")
+        expects_compact_joint4 = (
+            state_shape is not None
+            and action_shape is not None
+            and tuple(state_shape.shape) == (6,)
+            and tuple(action_shape.shape) == (6,)
+        )
+        robot.policy_compact_joint4 = expects_compact_joint4
+        logging.info(
+            "Configured Piper policy compatibility mode: compact_joint4=%s",
+            robot.policy_compact_joint4,
+        )
+
     if cfg.resume:
         dataset = LeRobotDataset(
             cfg.repo_id,

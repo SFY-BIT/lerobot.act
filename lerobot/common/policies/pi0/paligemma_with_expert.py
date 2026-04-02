@@ -2,7 +2,6 @@ from typing import List, Optional, Union
 
 import torch
 import torch.version
-from pytest import Cache
 from torch import nn
 from transformers import (
     AutoConfig,
@@ -11,6 +10,7 @@ from transformers import (
     PretrainedConfig,
     PreTrainedModel,
 )
+from transformers.cache_utils import Cache
 from transformers.models.auto import CONFIG_MAPPING
 
 from lerobot.common.policies.pi0.flex_attention import flex_attention_forward
